@@ -1,4 +1,3 @@
-
 import speech_recognition as sr
 import pyttsx3
 import datetime
@@ -9,290 +8,281 @@ import wikipedia
 import cv2
 import numpy as np
 
-# Initialize recognizer and text-to-speech engine
+# ======================= Initialization =========================
 recognizer = sr.Recognizer()
 engine = pyttsx3.init()
 
-# Function to speak text
+# Configure voice properties
+voices = engine.getProperty('voices')
+if len(voices) > 1:
+    engine.setProperty('voice', voices[1].id)  # 0 for male, 1 for female
+else:
+    print("Female voice not found, using default.")
+engine.setProperty('rate', 185)
+engine.setProperty('volume', 1.0)
+
 def speak(text):
+    """Function to speak the given text."""
     engine.say(text)
     engine.runAndWait()
 
-# Voice Adjustment
-voices = engine.getProperty('voices')
-engine.setProperty('voice', voices[1].id)  # 0 for male, 1 for female
-engine.setProperty('rate', 185)  # Speed (default is 200)
-engine.setProperty('volume', 1.0)
+# ======================= Startup Menu & Dataset ========================
+def startup_menu():
+    """Displays a menu for the user to register faces or start recognition."""
+    dataset_folder = os.path.join(os.getcwd(), "faces_dataset")
+    os.makedirs(dataset_folder, exist_ok=True)
+    
+    while True:
+        registered_faces = [name for name in os.listdir(dataset_folder) if os.path.isdir(os.path.join(dataset_folder, name))]
+        print(f"\n--- Assistant Menu ---")
+        print(f"{len(registered_faces)} face(s) registered.")
+        print("1. Register a new face")
+        print("2. Start face recognition")
+        print("3. Exit")
+        choice = input("Enter your choice (1, 2, or 3): ").strip()
 
-# Authorizing face OR New entry of face 
+        if choice == '1':
+            create_dataset()
+        elif choice == '2':
+            if not registered_faces:
+                print("No faces registered yet! Please register at least one face t1o continue.")
+                speak("No faces registered yet! Please register at least one face to continue.")
+            else:
+                return True # Proceed to face recognition
+        elif choice == '3':
+            return False # Exit the program
+        else:
+            print("Invalid choice. Please try again.")
+
 def create_dataset():
+    """Captures and saves face images for a new user."""
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    person_name = input("Enter the name of the person: ")
+    person_name = input("Enter the name of the person: ").strip()
     person_path = os.path.join("faces_dataset", person_name)
     os.makedirs(person_path, exist_ok=True)
 
     cam = cv2.VideoCapture(0)
+    if not cam.isOpened():
+        print("Error: Could not open camera.")
+        return
+        
     count = 0
+    print("Look at the camera. Capturing 50 images...")
 
-    while count < 50:  # Adjust the number of images you want to capture
+    while count < 50:
         ret, frame = cam.read()
         if not ret:
-            print("Failed to capture image. Try again.")
+            print("Failed to capture image. Exiting.")
             break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
         for (x, y, w, h) in faces:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
             face = gray[y:y + h, x:x + w]
             img_path = os.path.join(person_path, f"face_{count}.jpg")
             cv2.imwrite(img_path, face)
             count += 1
+            # Display the progress on the frame
+            cv2.putText(frame, f"Images Captured: {count}/50", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
 
         cv2.imshow("Capturing Images", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q') or count >= 50:
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     cam.release()
     cv2.destroyAllWindows()
     print(f"Dataset created for {person_name} with {count} images.")
+    speak(f"Dataset created for {person_name}.")
 
-# Face Recognition Functions
-def capture_faces():
+# ======================= Face Recognition Logic =====================
+def load_and_train_recognizer():
+    """Loads images from the dataset and trains the face recognizer."""
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     recognizer = cv2.face.LBPHFaceRecognizer_create()
+    dataset_path = os.path.join(os.getcwd(), "faces_dataset")
 
-    dataset_path = r"D:\Study\Py_L_Vs\faces_dataset"
-    
-    if not os.path.exists(dataset_path):
-        raise FileNotFoundError(f"Dataset path '{dataset_path}' does not exist.")
-    
-    if not os.listdir(dataset_path):
-        raise ValueError("The dataset folder is empty. Please add labeled subfolders with images.")
+    images, labels, names = [], [], {}
+    current_id = 0
 
-    images, labels = [], []
-
-    # Load the dataset
-    for label, person_name in enumerate(os.listdir(dataset_path)):
+    for person_name in os.listdir(dataset_path):
         person_path = os.path.join(dataset_path, person_name)
+        if not os.path.isdir(person_path):
+            continue
+
+        names[current_id] = person_name
+        
         for image_name in os.listdir(person_path):
             img_path = os.path.join(person_path, image_name)
             img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-            images.append(img)
-            labels.append(label)
+            if img is not None:
+                images.append(img)
+                labels.append(current_id)
+        
+        current_id += 1
+
+    if not images:
+         raise ValueError("The dataset folder is empty or contains no valid images.")
 
     recognizer.train(images, np.array(labels))
-    return face_cascade, recognizer, os.listdir(dataset_path)
-#face reco
-def recognize_face(face_cascade, recognizer, labels):
-    cam = cv2.VideoCapture(1)
-    print("Looking for your face...")
+    return face_cascade, recognizer, names
 
+def recognize_face(face_cascade, recognizer, names):
+    """Attempts to recognize a face from the camera feed."""
+    cam = cv2.VideoCapture(0)
     if not cam.isOpened():
         print("Error: Could not access the camera.")
-        return False
+        return False, None
 
-    print("Looking for your face...")
+    print("Looking for a recognized face...")
+    
+    recognized = False
+    recognized_name = None
 
-    while True:
+    for _ in range(150): # Try for about 5 seconds
         ret, frame = cam.read()
-
-
         if not ret:
-            print("Failed to grab frame!")
             break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
-        if len(faces) == 0:
-            print("No faces detected!")
-        else:
-            print(f"Detected faces: {len(faces)}")  # Debugging line
-
         for (x, y, w, h) in faces:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
             face = gray[y:y + h, x:x + w]
-            label, confidence = recognizer.predict(face)
+            label_id, confidence = recognizer.predict(face)
 
-            print(f"Predicted label: {label}, Confidence: {confidence}")  # Debugging line
+            # Lower confidence value means better match
+            if confidence < 75:
+                recognized_name = names[label_id]
+                cv2.putText(frame, recognized_name, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                recognized = True
+            else:
+                 cv2.putText(frame, "Unknown", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
 
-            # Adjust the confidence threshold if necessary
-            if confidence < 70:
-                print(f"Face recognized as {labels[label]} with confidence {confidence}")
-                cam.release()
-                cv2.destroyAllWindows()
-                speak(f"Welcome, {labels[label]}")
-                return True
+
+        cv2.imshow("Face Recognition", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q') or recognized:
+            break
 
     cam.release()
     cv2.destroyAllWindows()
-    return False
+    return recognized, recognized_name
 
-
-# Replace wake word detection with face recognition
 def face_recognition_trigger():
-    face_cascade, recognizer, labels = capture_faces()
-    while True:
-        if recognize_face(face_cascade, recognizer, labels):
-            speak("How can I assist you today?")
-            if listen_for_commands():
-                break
+    """Main loop for face recognition and command listening."""
+    try:
+        face_cascade, recognizer, names = load_and_train_recognizer()
+        recognized, name = recognize_face(face_cascade, recognizer, names)
+        
+        if recognized:
+            speak(f"Welcome, {name}. How can I assist you today?")
+            listen_for_commands()
+        else:
+            speak("Face not recognized. Shutting down.")
+            print("Face not recognized.")
+    except ValueError as e:
+        print(e)
+        speak(str(e))
 
-# Function to get the current time
+
+# ======================= Assistant Commands =====================
 def get_time():
-    now = datetime.datetime.now()
-    return now.strftime("%H:%M")
+    return datetime.datetime.now().strftime("%H:%M")
 
-# Function to get the current date
 def get_date():
-    now = datetime.datetime.now()
-    return now.strftime("%A, %B %d, %Y")
+    return datetime.datetime.now().strftime("%A, %B %d, %Y")
 
-# Function to handle commands
-def open_application(command):
-    print(f"Processing command: {command}")  
-    if 'time' in command.lower():
-        current_time = get_time()
-        speak(f"The current time is {current_time}")
-    elif 'date' in command.lower():
-        current_date = get_date()
-        speak(f"Today's date is {current_date}")
-
-    elif 'play song' in command.lower():
-        speak("Playing")
-        webbrowser.open("https://www.youtube.com/watch?v=EsTx07oNQNQ&list=LL")
-
-    elif 'open youtube' in command.lower():
-        speak("Opening YouTube")
-        webbrowser.open("https://www.youtube.com")
-
-    elif 'open chrome' in command.lower():
-        speak("Opening Chrome")
-        os.system("start chrome")
-
-    elif 'open facebook' in command.lower():
-        speak("Opening Facebook")
-        webbrowser.open("https://www.facebook.com")
-
-    elif 'open steam' in command.lower():
-        speak("Opening Steam")
-        os.system(r'"C:\Program Files (x86)\Steam\Steam.exe"')
-
-    elif 'shut down' in command.lower():  
-        speak("Shutting down the system...")
-        os.system('shutdown /s /f /t 0')
-
-    elif 'get news' in command.lower():
-        get_news()
-
-    elif 'google' in command.lower():
-        speak("Opening Google")
-        webbrowser.open("https://www.google.com/")
-
-    # To open the website on basis of website name
-    elif 'open' in command.lower():
-        speak("Which website would you like to open?")
-        with sr.Microphone() as source:
-            recognizer.adjust_for_ambient_noise(source)
-            audio = recognizer.listen(source)
-            try:
-                website_name = recognizer.recognize_google(audio).lower().strip()
-                constructed_url = f"https://{website_name}.com"
-                print(constructed_url)
-                speak(f"Opening {website_name}")
-                webbrowser.open(constructed_url)
-            except sr.UnknownValueError:
-                speak("Please say the website name clearly.")
-            except sr.RequestError:
-                speak("There was an issue with the recognition service.")
-
-    # function to get info from wiki
-    elif 'get information' in command.lower():
-        speak("What topic information would you like to search sir? ")
-        with sr.Microphone() as source:
-            recognizer.adjust_for_ambient_noise(source)
-            audio = recognizer.listen(source)
-            try:
-                topic = recognizer.recognize_google(audio).strip()
-                speak(f"Searching Wikipedia for {topic}")
-
-                # Attempt to fetch the summary from Wikipedia
-                try:
-                    summary = wikipedia.summary(topic, sentences=5)  # Fetch 5 sentences
-                    speak(f"Here is what I found about {topic}:")
-                    speak(summary)
-
-                    # Save to a txt file
-                    with open(f"{topic}.txt", "w", encoding="utf-8") as file:
-                        file.write(f"Wikipedia Summary for {topic}:\n\n{summary}")
-                    speak(f"The information has been saved to {topic}.txt")
-                except wikipedia.exceptions.DisambiguationError:
-                    speak("The topic is ambiguous. Please be more specific.")
-                except wikipedia.exceptions.PageError:
-                    speak("Sorry, I couldn't find any information on that topic.")
-                except wikipedia.exceptions.HTTPTimeoutError:
-                    speak("There was a timeout while fetching the Wikipedia page. Please try again later.")
-                except Exception as e:
-                    speak(f"An error occurred while fetching the Wikipedia page: {e}")
-            except sr.UnknownValueError:
-                speak("I couldn't understand the topic. Please say it clearly.")
-            except sr.RequestError:
-                speak("There was an issue with the recognition service.")
-            except Exception as e:
-                speak(f"An error occurred with speech recognition: {e}")
-
-    # To stop the listening loop
-    elif 'exit' in command.lower():
-        speak("See you soon sir")
-        return True  
-
-    else:
-        speak("Command not recognized. Please try again.")
-        return False
-
-# News Section
 def get_news():
-    api_key = "ce495cd379e8429a82925e35d8cff755"  
-    url = f"https://newsapi.org/v2/top-headlines?country=us&apiKey={api_key}"
-    response = requests.get(url)
-
-    if response.status_code == 200:
+    # IMPORTANT: Replace with your own key from newsapi.org
+    api_key = "YOUR_NEWS_API_KEY_HERE"
+    url = f"https://newsapi.org/v2/top-headlines?country=in&apiKey={api_key}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
         data = response.json()
-        articles = data['articles']
+        articles = data.get('articles', [])
         if articles:
-            speak(f"Here are the latest news headlines:")
-            for article in articles[:5]:  
-                title = article['title']
-                speak(f"{title}")
+            speak("Here are the top news headlines:")
+            for article in articles[:3]: # Read top 3
+                speak(article['title'])
         else:
             speak("No news articles available at the moment.")
-    else:
+    except requests.exceptions.RequestException:
         speak("Sorry, I couldn't fetch the news at the moment.")
 
-
-
-# Google ap
-
-# Function to listen for commands
-def listen_for_commands():
-    print("Now listening for commands...")
-    while True:
-        with sr.Microphone() as source:
-            recognizer.adjust_for_ambient_noise(source)
-            print("Listening for commands...")
-            audio = recognizer.listen(source)
-
+def open_application(command):
+    """Handles various voice commands."""
+    command = command.lower()
+    if 'time' in command:
+        speak(f"The current time is {get_time()}")
+    elif 'date' in command:
+        speak(f"Today's date is {get_date()}")
+    elif 'play song' in command:
+        speak("Playing a song on YouTube.")
+        webbrowser.open("https://www.youtube.com/watch?v=dQw4w9WgXcQ") # A classic
+    elif 'open youtube' in command:
+        speak("Opening YouTube")
+        webbrowser.open("https://www.youtube.com")
+    elif 'open chrome' in command:
+        speak("Opening Chrome")
+        os.system("start chrome")
+    elif 'get news' in command:
+        get_news()
+    elif 'google' in command:
+        speak("Opening Google")
+        webbrowser.open("https://www.google.com")
+    elif 'get information' in command:
+        speak("What topic would you like to know about?")
         try:
+            with sr.Microphone() as source:
+                recognizer.adjust_for_ambient_noise(source)
+                audio = recognizer.listen(source)
+                topic = recognizer.recognize_google(audio).strip()
+                speak(f"Searching Wikipedia for {topic}")
+                summary = wikipedia.summary(topic, sentences=3)
+                speak("According to Wikipedia:")
+                speak(summary)
+        except sr.UnknownValueError:
+            speak("I couldn't understand the topic.")
+        except (sr.RequestError, wikipedia.exceptions.PageError, wikipedia.exceptions.DisambiguationError) as e:
+            speak(f"Sorry, I could not find information on that topic. Error: {e}")
+    elif 'exit' in command or 'goodbye' in command:
+        speak("Goodbye!")
+        return True # Signal to stop listening
+    else:
+        speak("Command not recognized.")
+    return False # Signal to continue listening
+
+def listen_for_commands():
+    """Listens for voice commands until the exit command is given."""
+    print("Listening for commands...")
+    while True:
+        try:
+            with sr.Microphone() as source:
+                recognizer.adjust_for_ambient_noise(source)
+                audio = recognizer.listen(source, timeout=5, phrase_time_limit=5)
+            
             command = recognizer.recognize_google(audio)
             print(f"You said: {command}")
             if open_application(command):
-                return True
-            else:
-                continue
+                break
         except sr.UnknownValueError:
-            pass
+            pass # Ignore if speech is not understood
         except sr.RequestError:
-            speak("Sorry, the service is down.")
+            speak("Sorry, the recognition service is down.")
+        except sr.WaitTimeoutError:
+            speak("I didn't hear anything. Shutting down.")
+            break
 
-# Start face recognition trigger
-face_recognition_trigger()
+
+# ======================= Main Execution Block =====================
+if __name__ == "__main__":
+    # The startup_menu function will return True if the user wants to proceed
+    # with face recognition, and False if they choose to exit.
+    if startup_menu():
+        face_recognition_trigger()
+    
+    print("Program finished.")
